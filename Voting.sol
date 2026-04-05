@@ -10,16 +10,20 @@ contract Voting{
         uint128 memberVotes;
     }
 
-    uint public totalVotes;
+    uint public latestVotingIndex = 0;
     address public owner;
-    uint128 public startTime;
-    uint128 public endingTime;
     bool isVotingStarted;
     bool isPaused;
 
-    mapping(address=>Member) public memberVotes;
-    mapping(address=>bool) public isVoted;
-    mapping(address=>bool) isMember;
+    mapping(uint=>uint128) public startTime;
+    mapping(uint=>uint128) public endingTime;
+    mapping(uint=>uint) public totalVotes;
+    mapping(uint=>address) public currentWinner;
+    mapping(uint=>address) public secondHighestVotes;
+    mapping(uint=>address[]) public members;
+    mapping(uint=>mapping(address=>Member)) public memberVotes;
+    mapping(uint=>mapping(address=>bool)) public isVoted;
+    mapping(uint=>mapping(address=>bool)) isMember;
 
     event MemberAdded(address indexed member,uint128 timeAdded);
     event UserVoted(address indexed user, address indexed member, uint128 timeVoted);
@@ -29,8 +33,10 @@ contract Voting{
     /// @notice Initializes the contract and sets deployer as owner and first member
     constructor(){
         owner = msg.sender;
-        isMember[owner] = true;
-        memberVotes[owner] = Member(owner,0);
+        isMember[latestVotingIndex][owner] = true;
+        memberVotes[latestVotingIndex][owner] = Member(owner,0);
+        members[latestVotingIndex].push(msg.sender);
+        currentWinner[latestVotingIndex] = msg.sender;
     }
 
     /// @notice Ensures contract is not paused
@@ -42,6 +48,12 @@ contract Voting{
     /// @notice Restricts function access to contract owner
     modifier onlyOwner(){
         require(msg.sender==owner,"Not Authorised");
+        _;
+    }
+
+    /// @notice Check if the voting ended
+    modifier whenNotEnded(){
+        require(block.timestamp>=endingTime[latestVotingIndex],"Voting Not Ended");
         _;
     }
 
@@ -64,35 +76,31 @@ contract Voting{
     /// @notice Starts the voting process
     /// @dev Sets start and end time based on duration
     /// @param _endTime Duration of voting in days
-    function startVoting(uint _endTime) public {
-        require(msg.sender==owner,"Not Authorised");
+    function startVoting(uint _endTime) public onlyOwner{
         require(!isVotingStarted,"Voting Already Started. Wait For It To Stop");
-
-        startTime = uint128(block.timestamp);
-        endingTime = uint128(block.timestamp + (_endTime*1 days));
+        require(_endTime>600,"Minimum 10 Minutes Required To Start Voting");
+        startTime[latestVotingIndex] = uint128(block.timestamp);
+        endingTime[latestVotingIndex] = uint128(block.timestamp + (_endTime*1 days));
         isVotingStarted = true;
     }
 
     /// @notice Stops the voting process after end time
     /// @dev Only callable by owner and after voting period ends
-    function stopVoting() public {
-        require(msg.sender==owner,"Not Authorised");
+    function stopVoting() public onlyOwner{
         require(isVotingStarted,"Not Started");
-        require(block.timestamp>endingTime,"Voting Is Not Ended");
-
+        require(block.timestamp>endingTime[latestVotingIndex],"Voting Is Not Ended");
         isVotingStarted = false;
     }
 
     /// @notice Adds a new member eligible for voting
     /// @dev Only owner can add members
     /// @param _user Address of the member to be added
-    function makeMember(address _user) public{
-        require(msg.sender==owner,"Not Authorised");
-        require(!isMember[_user],"Already A Member");
-
-        isMember[_user] = true;
-        memberVotes[_user] = Member(_user,0);
-
+    function makeMember(address _user) public onlyOwner{
+        require(!isMember[latestVotingIndex][_user],"Already A Member");
+        require(_user != address(0),"Invalid Address");
+        isMember[latestVotingIndex][_user] = true;
+        memberVotes[latestVotingIndex][_user] = Member(_user,0);
+        members[latestVotingIndex].push(_user);
         emit MemberAdded(_user, uint128(block.timestamp));
     }
 
@@ -101,30 +109,51 @@ contract Voting{
     /// @param _member Address of the member being voted for
     function vote(address _member) public whenNotPaused{
         require(isVotingStarted, "Voting not started");
-        require(block.timestamp <= endingTime, "Voting ended");
-        require(isMember[_member],"User Is Not A Member");
-        require(!isVoted[msg.sender],"Already Voted");
-
-        Member storage m = memberVotes[_member];
-
-        totalVotes++;
+        require(block.timestamp <= endingTime[latestVotingIndex], "Voting ended");
+        require(isMember[latestVotingIndex][_member],"User Is Not A Member");
+        require(!isVoted[latestVotingIndex][msg.sender],"Already Voted");
+        Member storage m = memberVotes[latestVotingIndex][_member];
+        totalVotes[latestVotingIndex]++;
         m.memberVotes++;
-        isVoted[msg.sender] = true;
-
+        isVoted[latestVotingIndex][msg.sender] = true;
+        if(m.memberVotes>memberVotes[latestVotingIndex][currentWinner[latestVotingIndex]].memberVotes){
+            secondHighestVotes[latestVotingIndex] = currentWinner[latestVotingIndex];
+            currentWinner[latestVotingIndex] = _member;
+        }else if(memberVotes[latestVotingIndex][_member].memberVotes==memberVotes[latestVotingIndex][currentWinner[latestVotingIndex]].memberVotes){
+            secondHighestVotes[latestVotingIndex] = _member;
+        }
         emit UserVoted(msg.sender, _member, uint128(block.timestamp));
     }
 
-    /// @notice Returns the winning member (not implemented yet)
+
+    /// @notice Allow Owner to start new voting
+    function startNewVotingPeriod() public onlyOwner{
+        require(!isVotingStarted,"Stop Current Voting First");
+        isVotingStarted = false;
+        isPaused = false;
+        latestVotingIndex ++;
+        isMember[latestVotingIndex][owner] = true;
+        memberVotes[latestVotingIndex][owner] = Member(owner,0);
+        members[latestVotingIndex].push(owner);
+        currentWinner[latestVotingIndex] = owner;
+    }
+
+
+    /// @notice Returns the winning member
     /// @dev Should iterate through members and find highest votes
     /// @return winner The member with highest votes
-    function getWinner() public view returns(Member memory){
-        // Not implemented
+    function getWinner() public view whenNotEnded returns(Member memory){
+        require(members[latestVotingIndex].length>0,"No Members Participated");
+        if(secondHighestVotes[latestVotingIndex] == address(0)) return memberVotes[latestVotingIndex][currentWinner[latestVotingIndex]];
+        if(memberVotes[latestVotingIndex][secondHighestVotes[latestVotingIndex]].memberVotes==memberVotes[latestVotingIndex][currentWinner[latestVotingIndex]].memberVotes) revert("Tie Occured");
+        return memberVotes[latestVotingIndex][currentWinner[latestVotingIndex]];
     }
 
     /// @notice Returns vote details of a specific member
     /// @param _user Address of the member
     /// @return Member struct containing address and vote count
     function viewVotes(address _user) public view returns(Member memory){
-        return memberVotes[_user];
+        require(isMember[latestVotingIndex][_user],"Not A Member");
+        return memberVotes[latestVotingIndex][_user];
     }
 }
